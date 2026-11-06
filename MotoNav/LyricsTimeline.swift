@@ -1,6 +1,8 @@
 import Foundation
 
 struct LyricsTrack: Equatable {
+    // Foundation 使用 ICU 转换标识，兼容简繁中文搜索。
+    private static let chineseTransform = StringTransform(rawValue: "Traditional-Simplified")
     let title: String, artist: String, album: String
     let duration: Double
     var key: String { "\(title)\n\(artist)\n\(album)\n\(duration)" }
@@ -14,8 +16,8 @@ struct LyricsTrack: Equatable {
     // 精确查询没有结果时，用简体和繁体搜索候选，不携带专辑筛选。
     var searchURLs: [URL] {
         let variants = [(title, artist),
-                        (title.applyingTransform(.traditionalToSimplified, reverse: true) ?? title,
-                         artist.applyingTransform(.traditionalToSimplified, reverse: true) ?? artist)]
+                        (title.applyingTransform(Self.chineseTransform, reverse: true) ?? title,
+                         artist.applyingTransform(Self.chineseTransform, reverse: true) ?? artist)]
         var seen = Set<String>()
         return variants.compactMap { pair in
             let (title, artist) = pair
@@ -27,7 +29,7 @@ struct LyricsTrack: Equatable {
     }
     func matches(title: String, artist: String, album: String, duration: Double) -> Bool {
         func normalized(_ text: String) -> String {
-            (text.applyingTransform(.traditionalToSimplified, reverse: false) ?? text)
+            (text.applyingTransform(Self.chineseTransform, reverse: false) ?? text)
                 .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: Locale(identifier: "en_US_POSIX"))
                 .unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.map(String.init).joined()
         }
