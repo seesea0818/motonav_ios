@@ -1,0 +1,182 @@
+import Foundation
+
+var checks = 0
+func check(_ value: @autoclosure () -> Bool, _ label: String) { precondition(value(), label); checks += 1 }
+let payloads = [Data([1]), Data([2]), Data([3])]
+var writer = BleBulkWriteQueue()
+writer.replace(type: 3, id: 1, packets: payloads)
+let first = writer.next()!
+check(first.data == payloads[0] && writer.next() == nil, "Only one ATT write may be in flight")
+check(writer.complete(success: false) == .retry, "Failed fragment retries before later fragments")
+check(writer.next()?.data == first.data, "Retry preserves exact bytes")
+check(writer.complete(success: true) == .sent, "ATT response releases the next fragment")
+check(writer.next()?.data == payloads[1], "No fragment skipped after recovery")
+writer.replace(type: 3, id: 2, packets: [Data([9])])
+check(writer.complete(success: false) == .obsolete, "Late failure cannot resurrect superseded map")
+check(writer.next()?.id == 2, "Replacement begins after outstanding callback")
+writer.acknowledge(type: 3, id: 2)
+check(writer.hasData && !writer.canStart, "Early application K still waits for outstanding ATT callback")
+check(writer.complete(success: false) == .sent && !writer.hasData, "Application acknowledgement prevents unnecessary retransmission")
+
+writer.replace(type: 3, id: 3, packets: payloads)
+writer.replace(type: 2, id: 8, packets: [Data([7])])
+for attempt in 1...3 {
+    check(writer.next()?.attempts == attempt, "ATT retries remain bounded")
+    _ = writer.complete(success: false)
+}
+check(writer.next()?.type == 2, "Permanent map error keeps independent route transfer")
+_ = writer.complete(success: true)
+check(!writer.hasData, "Failed map queue empties so application can retry complete map")
+writer.replace(type: 3, id: 4, packets: payloads)
+_ = writer.next()
+writer.replace(type: 3, id: 5, packets: [Data([8])])
+writer.acknowledge(type: 3, id: 4)
+_ = writer.complete(success: true)
+check(writer.next()?.id == 5, "Old K cannot clear a newer map")
+writer.reset()
+check(!writer.hasData && writer.inFlight == nil, "Disconnect clears outstanding writes")
+
+// Continuous decorative images and 50 position/turn commands per second must not starve a map.
+// Each ATT response takes 35ms; commands can be served while awaiting the response.
+writer.replace(type: 3, id: 6, packets: (0..<60).map { Data([UInt8($0)]) })
+var pace = BleWritePacer(), time = 0.0, responseAt: Double?, nextCommand = 0.0
+var commandQueued = false, commands = 0, delivered: [UInt8] = [], imageWrites = 0
+while writer.hasData {
+    if time >= nextCommand { commandQueued = true; nextCommand += 0.02 }
+    if let deadline = responseAt, time >= deadline {
+        delivered.append(writer.inFlight!.data[0]); _ = writer.complete(success: true); responseAt = nil
+    }
+    let choice = BleOutboundPriority.choose(commandReady: commandQueued, bulkReady: writer.canStart,
+        bulkPending: writer.hasData, imageReady: true)
+    if choice != .idle, pace.take(now: time) {
+        switch choice {
+        case .command: commandQueued = false; commands += 1
+        case .bulk: _ = writer.next(); responseAt = time + 0.035
+        case .image: imageWrites += 1
+        case .idle: break
+        }
+    }
+    time += 0.001
+    precondition(time < 4, "Map deadline missed")
+}
+check(delivered == Array(UInt8(0)..<UInt8(60)), "Every fragment delivered in order despite continuous image traffic")
+check(commands > 100 && !commandQueued, "Position and turn commands remain live during ATT transfer")
+check(time < 3, "60-fragment map finishes within viewport handoff time")
+check(imageWrites <= 1, "Decorative images yield during map transfer")
+
+// Device measurements show ~100ms ATT round trips. Batch four commands between barriers
+// so a 60-fragment map still arrives before the previous viewport expires at highway speed.
+writer.reset(); writer.replace(type: 3, id: 7, packets: (0..<60).map { Data([UInt8($0)]) })
+pace.reset(); time = 0; responseAt = nil; nextCommand = 0; commandQueued = false
+delivered = []; commands = 0
+var barrier = BleBulkBarrier(), outstanding = 0, peakOutstanding = 0
+while writer.hasData {
+    if time >= nextCommand { commandQueued = true; nextCommand += 0.02 }
+    if let deadline = responseAt, time >= deadline {
+        delivered.append(writer.inFlight!.data[0]); _ = writer.complete(success: true)
+        barrier.reset(); responseAt = nil; outstanding = 0
+    }
+    let choice = BleOutboundPriority.choose(commandReady: commandQueued, bulkReady: writer.canStart,
+        bulkPending: writer.hasData, imageReady: true)
+    if choice != .idle, pace.take(now: time) {
+        switch choice {
+        case .command: commandQueued = false; commands += 1
+        case .bulk:
+            let part = writer.next()!, seq = Int(part.data[0])
+            let respond = barrier.needsResponse(seq: seq, parts: 60, retry: false, commandReady: true)
+            outstanding += 1; peakOutstanding = max(peakOutstanding, outstanding)
+            if respond { responseAt = time + 0.1 }
+            else { delivered.append(part.data[0]); _ = writer.complete(success: true) }
+        case .image, .idle: break
+        }
+    }
+    time += 0.001; precondition(time < 4, "Batched map misses deadline")
+}
+check(delivered == Array(UInt8(0)..<UInt8(60)), "Batched fragments preserve order and content")
+check(peakOutstanding <= 5 && time < 2, "Realistic 100ms round trips keep map under two seconds with bounded bursts")
+check(commands > 50, "Navigation remains responsive during confirmed batches")
+barrier.reset()
+check(barrier.needsResponse(seq: 0, parts: 60, retry: false, commandReady: true), "Validate first fragment before command burst")
+check(barrier.needsResponse(seq: 59, parts: 60, retry: false, commandReady: true), "Last fragment waits for actual transport response")
+check(barrier.needsResponse(seq: 5, parts: 60, retry: true, commandReady: true), "Failed barrier retry cannot silently become unconfirmed")
+check(!barrier.needsResponse(seq: 5, parts: 60, retry: false, commandReady: false), "Host backpressure must wait for credits instead of converting each fragment into a response write")
+print("BLE bulk: \(checks) checks passed; map delivery \(String(format: "%.2f", time))s, \(commands) navigation commands")
+var clockWriter=BleBulkWriteQueue()
+clockWriter.replace(type:3,id:1,packets:[Data([1]),Data([2])])
+let held=clockWriter.next()!
+let clockWire=Data("#TIME,1793433600,28800".utf8)
+clockWriter.replace(type:0,id:1,packets:[clockWire],prioritize:true)
+check(clockWriter.next()==nil && clockWriter.inFlight?.type==held.type,"Clock cannot overlap the in-flight ATT map write")
+_ = clockWriter.complete(success:true)
+let clockPart=clockWriter.next()!
+check(clockPart.type==0 && clockPart.data==clockWire && clockWire.count>20,"Unfragmented clock command receives the next acknowledged ATT slot")
+_ = clockWriter.complete(success:true)
+check(clockWriter.next()?.data==Data([2]),"Map transfer resumes after the clock acknowledgement")
+print("PASS clock ATT serialization, priority and complete message above the default 20-byte limit")
+var changingStyle=BleBulkWriteQueue()
+changingStyle.replace(type:3,id:1,packets:[Data([11]),Data([12])])
+_ = changingStyle.next()
+changingStyle.replace(type:2,id:1,packets:[Data([20])])
+changingStyle.replace(type:0,id:1,packets:[clockWire],prioritize:true)
+changingStyle.cancel(types:[1,3])
+check(changingStyle.next()==nil,"Style cancellation preserves the outstanding ATT callback slot")
+check(changingStyle.complete(success:false) == .obsolete,"Old-style failed frame cannot retry after cancellation")
+changingStyle.replace(type:3,id:2,packets:[Data([30])])
+check(changingStyle.next()?.type==0,"Style change keeps the pending clock")
+_ = changingStyle.complete(success:true)
+check(changingStyle.next()?.type==2,"Style change keeps route geometry")
+_ = changingStyle.complete(success:true)
+check(changingStyle.next()?.id==2,"Only the new style's base map resumes")
+print("PASS style-change map cancellation without dropping clock or route packets")
+
+writer.reset();writer.replace(type:3,id:88,packets:payloads)
+check(writer.contains(type:3,id:88),"map transfer is pending before its first fragment")
+_ = writer.next()
+check(writer.contains(type:3,id:88),"in-flight fragment protects the map from replacement")
+check(!writer.contains(type:3,id:89),"pending check is specific to map ID")
+writer.acknowledge(type:3,id:88)
+check(writer.contains(type:3,id:88),"early K still retains the ATT callback slot")
+_ = writer.complete(success:true)
+check(!writer.contains(type:3,id:88),"finished map releases staged successor")
+print("PASS ID-specific map transfer protection")
+
+
+// Replay realistic byte/MTU combinations through the real write queue/pacer/barrier.
+// This measures the model's wire time instead of assuming every map takes 1–3s.
+func wireTime(bytes:Int,maxWrite:Int,rtt:Double)->Double {
+    let count=(bytes+maxWrite-16)/(maxWrite-15)
+    var queue=BleBulkWriteQueue(),pacer=BleWritePacer(),barrier=BleBulkBarrier()
+    queue.replace(type:3,id:17,packets:(0..<count).map{Data([UInt8($0&255),UInt8(($0>>8)&255)])})
+    var now=0.0,ackAt:Double?,nextPosition=0.0,positionQueued=false,delivered=0
+    while queue.hasData {
+        if now>=nextPosition {positionQueued=true;nextPosition+=0.1}
+        if let at=ackAt,now>=at {_ = queue.complete(success:true);barrier.reset();ackAt=nil;delivered+=1}
+        let choice=BleOutboundPriority.choose(commandReady:positionQueued,bulkReady:queue.canStart,bulkPending:queue.hasData,imageReady:false)
+        if choice != .idle,pacer.take(now:now) {
+            if choice == .command {positionQueued=false}
+            else if choice == .bulk,let part=queue.next() {
+                let seq=Int(part.data[0])|Int(part.data[1])<<8
+                if barrier.needsResponse(seq:seq,parts:count,retry:false,commandReady:true) {ackAt=now+rtt}
+                else {_ = queue.complete(success:true);delivered+=1}
+            }
+        }
+        now+=0.001;precondition(now<300,"wire simulation stalled")
+    }
+    check(delivered==count,"real-size map delivers all fragments in model")
+    return now
+}
+let smallMapTime=wireTime(bytes:16000,maxWrite:182,rtt:0.1)
+let detailedMapTime=wireTime(bytes:80000,maxWrite:182,rtt:0.1)
+let slowMapTime=wireTime(bytes:80000,maxWrite:182,rtt:0.18)
+check(detailedMapTime>3 && detailedMapTime>smallMapTime*3,"large raster invalidates the old three-second fixed wire assumption")
+check(slowMapTime>detailedMapTime*1.5,"ATT delay materially changes map delivery time")
+print("PASS actual-size modeled wire: 16KB=\(smallMapTime)s, 80KB=\(detailedMapTime)s, slower 80KB=\(slowMapTime)s")
+var trace=MapTraceBuffer()
+trace.append(name:"map-send",fields:["bytes":80000,"ready":true,"lat":30.1,"lng":104.2,"apiKey":"PRIVATE","cookie":"PRIVATE","job":"PRIVATE","elapsed":Double.nan],seconds:1)
+let traceJSON=try! JSONSerialization.data(withJSONObject:trace.document)
+let traceText=String(data:traceJSON,encoding:.utf8)!
+check(!traceText.contains("PRIVATE") && !traceText.contains("lat") && !traceText.contains("lng"),"trace allowlist excludes locations and secrets")
+check(traceText.contains("80000"),"trace preserves the transport measurement")
+for i in 0..<MapTraceBuffer.capacity+10 {trace.append(name:"bulk-write",fields:["seq":i],seconds:Double(i))}
+check(trace.events.count==MapTraceBuffer.capacity && trace.dropped==11,"timing diagnostics have bounded memory")
+print("PASS timing record numeric allowlist, coordinate/secret exclusion and bounded event storage")
