@@ -13,13 +13,13 @@ final class LyricsBridge {
     private var key = "", token = UUID(), task: URLSessionDataTask?, work: DispatchWorkItem?, timer: Timer?
     private var titleRevision: UInt16 = 0, artistRevision: UInt16 = 0
     private var generation: UInt32?, playbackRevision: UInt16 = 0, clock: MediaPlaybackClock?
-    private var track: LyricsTrack?, timeline: LyricsTimeline?, lastLine: String?, lyricsEnabled = false
+    private var track: LyricsTrack?, timeline: LyricsTimeline?, lastLines: [String]?, lyricsEnabled = false
     func update(_ metadata: AMSMetadata, force: Bool = false) {
         guard Settings.shared.musicLyrics && Settings.shared.musicHID && BleLink.shared.mediaLyricsSupported && BleLink.shared.isReady else { stop(); return }
         lyricsEnabled = true
         if generation != metadata.generation { resetTrack(); generation = metadata.generation; playbackRevision = 0; clock = nil }
         if titleRevision != metadata.values[0].revision || artistRevision != metadata.values[1].revision {
-            titleRevision = metadata.values[0].revision; artistRevision = metadata.values[1].revision; lastLine = nil
+            titleRevision = metadata.values[0].revision; artistRevision = metadata.values[1].revision; lastLines = nil
         }
         if playbackRevision != metadata.values[4].revision {
             playbackRevision = metadata.values[4].revision
@@ -41,7 +41,7 @@ final class LyricsBridge {
             }
             work = item; DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: item)
         }
-        if force { lastLine = nil }
+        if force { lastLines = nil }
         if timer == nil { timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.tick() } }
         tick()
     }
@@ -51,7 +51,7 @@ final class LyricsBridge {
     }
     private func resetTrack() {
         token = UUID(); task?.cancel(); task = nil; work?.cancel(); work = nil; key = ""; track = nil; timeline = nil
-        sendLine("")
+        sendLines(Array(repeating: "", count: 5))
     }
     private func fetch(_ track: LyricsTrack, token: UUID) {
         if let cached = cache[track.key], cached.expires > Date().timeIntervalSince1970 { apply(cached, track: track, token: token); return }
@@ -86,14 +86,19 @@ final class LyricsBridge {
         timeline = result.timeline; BleLink.shared.mediaLyricsStatus = result.status; tick()
     }
     private func tick() {
-        guard lyricsEnabled, let track = track, let timeline = timeline, let clock = clock else { sendLine(""); return }
-        sendLine(timeline.line(at: clock.position(now: ProcessInfo.processInfo.systemUptime, duration: track.duration)))
+        guard lyricsEnabled, let track = track, let timeline = timeline, let clock = clock else { sendLines(Array(repeating: "", count: 5)); return }
+        sendLines(timeline.upcoming(at: clock.position(now: ProcessInfo.processInfo.systemUptime, duration: track.duration)))
     }
-    private func sendLine(_ text: String) {
-        guard lastLine != text else { return }; lastLine = text
-        if !text.isEmpty, let generation = generation {
+    private func sendLines(_ lines: [String]) {
+        guard lines.count == 5, lastLines != lines else { return }
+        lastLines = lines
+        if lines.contains(where: { !$0.isEmpty }), let generation = generation {
             BleLink.shared.sendOnce("#LY,\(generation),\(titleRevision),\(artistRevision)")
         }
-        TextImage.send(slot: 12, String(text.prefix(200)), maxW: 360, size: 22, minSize: 16)
+        let limit = TextBitmapBudget.bytes(maxWrite: BleLink.shared.maxWrite)
+        for i in 0..<5 {
+            TextImage.send(slot: 12 + i, String(lines[i].prefix(200)), maxW: i == 0 ? 600 : 330,
+                           size: i == 0 ? 22 : 19, minSize: i == 0 ? 18 : 15, byteLimit: limit, bold: i == 0)
+        }
     }
 }

@@ -73,9 +73,22 @@ struct LyricsTimeline {
         cues = merged
     }
     func line(at seconds: Double) -> String {
-        guard seconds.isFinite, seconds >= 0 else { return "" }
+        lines(at: seconds).current
+    }
+    // 按时间定位当前歌词及相邻两句，开始前不显示未来歌词。
+    func lines(at seconds: Double) -> (previous: String, current: String, next: String) {
+        guard seconds.isFinite, seconds >= 0 else { return ("", "", "") }
         var low = 0, high = cues.count
         while low < high { let mid = (low + high) / 2; if cues[mid].time <= seconds { low = mid + 1 } else { high = mid } }
-        return low > 0 ? cues[low - 1].text : ""
+        guard low > 0 else { return ("", "", "") }
+        return (low >= 2 ? cues[low - 2].text : "", cues[low - 1].text, low < cues.count ? cues[low].text : "")
+    }
+    // 返回当前句和其后四句，时间未到第一句时保持空白。
+    func upcoming(at seconds: Double) -> [String] {
+        guard seconds.isFinite, seconds >= 0 else { return Array(repeating: "", count: 5) }
+        var low = 0, high = cues.count
+        while low < high { let mid = (low + high) / 2; if cues[mid].time <= seconds { low = mid + 1 } else { high = mid } }
+        guard low > 0 else { return Array(repeating: "", count: 5) }
+        return (0..<5).map { offset in let i = low - 1 + offset; return i < cues.count ? cues[i].text : "" }
     }
 }

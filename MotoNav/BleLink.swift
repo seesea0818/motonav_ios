@@ -39,6 +39,8 @@ final class BleLink: NSObject, ObservableObject {
     private(set) var crossSupported = false
     private var crossPendingID: Int?
     private var crossPendingUntil = Date.distantPast
+    private var crossPendingData: Data?
+    private var crossRetryCount = 0
     private var buildingProbe = BleCapabilityProbe()
     private var buildingQueries: Int { buildingProbe.attempts }
     private var txNotifyReady = false
@@ -76,7 +78,7 @@ final class BleLink: NSObject, ObservableObject {
     private var lastState: [String: String] = [:]          // 文字状态（重连后补发）
     private var stateOrder: [String] = []
     private var lastImg: [Int: (w: Int, h: Int, data: Data)] = [:]
-    private var imgId = [Int](repeating: 0, count: 13)
+    private var imgId = [Int](repeating: 0, count: 17)
     private var phoneClock=PhoneClockSync()
     private var clockWriteID=0
     private var clockObserver:NSObjectProtocol?
@@ -188,7 +190,7 @@ final class BleLink: NSObject, ObservableObject {
         isReady = false; txNotifyReady = false
         screenName=p.name ?? "MotoNav";screenBattery=nil;screenCharging=false
         buildingsSupported = false
-        mediaHIDSupported = false; mediaHIDReady = false; mediaHIDMode = false; mediaLyricsSupported = false; mediaLyricsActive = false; mediaAMSControls = 0; verified = false; crossSupported = false; crossPendingID = nil; buildingProbe.reset()
+        mediaHIDSupported = false; mediaHIDReady = false; mediaHIDMode = false; mediaLyricsSupported = false; mediaLyricsActive = false; mediaAMSControls = 0; verified = false; crossSupported = false; crossPendingID = nil; crossPendingData = nil; crossRetryCount = 0; buildingProbe.reset()
         MusicBridge.shared.resetAMS()
         peripheral = p
         p.delegate = self
@@ -316,11 +318,11 @@ final class BleLink: NSObject, ObservableObject {
     /// Remove queued/cached lyrics before an OFF command; no media-mode command here.
     func sendLyricsMode(_ message: String) {
         if message == "#ML,0" {
-            queue.removeAll { $0.key == "#LY" || $0.key?.hasPrefix("B12:") == true }
+            queue.removeAll { out in out.key == "#LY" || (12...16).contains(where: { out.key?.hasPrefix("B\($0):") == true }) }
             lastState.removeValue(forKey: "#LY"); stateOrder.removeAll { $0 == "#LY" }
         }
         send(message)
-        if message == "#ML,0" { sendImage(slot: 12, w: 0, h: 0, data: Data()) }
+        if message == "#ML,0" { for slot in 12...16 { sendImage(slot: slot, w: 0, h: 0, data: Data()) } }
     }
 
     /// 发一张文字图片（4 位灰度，两个像素一个字节）；w = 0 表示清空这一栏
@@ -357,7 +359,7 @@ final class BleLink: NSObject, ObservableObject {
             mapReceipt.begin(id:id,tail:tail)
             mapMeter.begin(id:id,bytes:total,at:ProcessInfo.processInfo.systemUptime)
         }
-        bulkQ.replace(type:type,id:id,packets:packets,prioritize:type==MapFeeder.TYPE_ROUTE)
+        bulkQ.replace(type:type,id:id,packets:packets,prioritize:type==MapFeeder.TYPE_ROUTE || type==5)
         bulkKB += total / 1024
         pump()
     }
@@ -372,12 +374,14 @@ final class BleLink: NSObject, ObservableObject {
     func sendCrossImage(id: Int, data: Data) {
         guard isReady, verified, crossSupported, data.count <= 65536, maxWrite - BULK_HEADER >= 100 else { return }
         crossPendingID = id
-        crossPendingUntil = Date().addingTimeInterval(10)
+        crossPendingData = data; crossRetryCount = 0
+        crossPendingUntil = Date().addingTimeInterval(15)
         sendOnce("#X,0")
         sendBulk(type: 5, id: id, data: data)
     }
     func hideCrossImage() {
         crossPendingID = nil
+        crossPendingData = nil; crossRetryCount = 0
         crossPendingUntil = .distantPast
         bulkQ.cancel(types: [5])
         if isReady && verified && crossSupported { sendOnce("#X,0") }
@@ -490,6 +494,20 @@ final class BleLink: NSObject, ObservableObject {
     }
 
     private func mapPartCompleted(_ part:BleBulkWriteQueue.Part) {
+        if part.type == 5, part.data.count >= BULK_HEADER {
+            let seq = Int(part.data[5]) | Int(part.data[6]) << 8
+            let count = Int(part.data[3]) | Int(part.data[4]) << 8
+            if seq == count - 1 {
+                let id = part.id
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                    guard let self = self, self.crossPendingID == id, self.crossRetryCount < 1,
+                          Date() < self.crossPendingUntil, let data = self.crossPendingData,
+                          self.isReady, self.verified, self.crossSupported else { return }
+                    self.crossRetryCount += 1
+                    self.sendBulk(type: 5, id: id, data: data)
+                }
+            }
+        }
         guard part.type==3,part.data.count>=BULK_HEADER else {return}
         let seq=Int(part.data[5])|Int(part.data[6])<<8, count=Int(part.data[3])|Int(part.data[4])<<8
         guard seq==count-1 else {return}
@@ -554,7 +572,7 @@ final class BleLink: NSObject, ObservableObject {
 extension BleLink: CBCentralManagerDelegate, CBPeripheralDelegate {
     func centralManagerDidUpdateState(_ c: CBCentralManager) {
         if c.state != .poweredOn {
-            isReady = false; txNotifyReady = false; buildingsSupported = false; mediaHIDSupported = false; mediaHIDReady = false; mediaHIDMode = false; mediaLyricsSupported = false; mediaLyricsActive = false; mediaAMSControls = 0; verified = false; crossSupported = false; crossPendingID = nil; buildingProbe.reset()
+            isReady = false; txNotifyReady = false; buildingsSupported = false; mediaHIDSupported = false; mediaHIDReady = false; mediaHIDMode = false; mediaLyricsSupported = false; mediaLyricsActive = false; mediaAMSControls = 0; verified = false; crossSupported = false; crossPendingID = nil; crossPendingData = nil; crossRetryCount = 0; buildingProbe.reset()
         MusicBridge.shared.resetAMS()
         }
         switch c.state {
@@ -590,7 +608,7 @@ extension BleLink: CBCentralManagerDelegate, CBPeripheralDelegate {
     func centralManager(_ c: CBCentralManager, didFailToConnect p: CBPeripheral, error: Error?) {
         guard p === peripheral else { return }
         status = "连接失败，重试中…"
-        mediaHIDSupported = false; mediaHIDReady = false; mediaHIDMode = false; mediaLyricsSupported = false; mediaLyricsActive = false; mediaAMSControls = 0; verified = false; crossSupported = false; crossPendingID = nil; buildingProbe.reset(); txNotifyReady = false
+        mediaHIDSupported = false; mediaHIDReady = false; mediaHIDMode = false; mediaLyricsSupported = false; mediaLyricsActive = false; mediaAMSControls = 0; verified = false; crossSupported = false; crossPendingID = nil; crossPendingData = nil; crossRetryCount = 0; buildingProbe.reset(); txNotifyReady = false
         MusicBridge.shared.resetAMS()
         isReady = false
         connectionRetries+=1
@@ -608,7 +626,7 @@ extension BleLink: CBCentralManagerDelegate, CBPeripheralDelegate {
         bulkQ.reset(); bulkBarrier.reset(); bulkWriteSerial += 1
         mapReceipt.reset();mapMeter.reset();lastWasCommand=false
         buildingsSupported = false
-        mediaHIDSupported = false; mediaHIDReady = false; mediaHIDMode = false; mediaLyricsSupported = false; mediaLyricsActive = false; mediaAMSControls = 0; verified = false; crossSupported = false; crossPendingID = nil; buildingProbe.reset(); txNotifyReady = false
+        mediaHIDSupported = false; mediaHIDReady = false; mediaHIDMode = false; mediaLyricsSupported = false; mediaLyricsActive = false; mediaAMSControls = 0; verified = false; crossSupported = false; crossPendingID = nil; crossPendingData = nil; crossRetryCount = 0; buildingProbe.reset(); txNotifyReady = false
         MusicBridge.shared.resetAMS()
         MapFeeder.shared.onBuildingCapability()
         rxChar = nil;txChar=nil
@@ -722,6 +740,7 @@ extension BleLink: CBCentralManagerDelegate, CBPeripheralDelegate {
             bulkQ.acknowledge(type: t, id: id)
             if t == 5 && crossPendingID == id {
                 crossPendingID = nil
+                crossPendingData = nil
                 if Date() < crossPendingUntil { sendOnce("#X,1") }
                 crossPendingUntil = .distantPast
             }

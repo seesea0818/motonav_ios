@@ -78,19 +78,19 @@ enum TextImage {
     struct Img { let w: Int; let h: Int; let data: Data }
 
     /// maxW：最大宽度（像素）；文字太长先缩小字号，还放不下就截断加省略号
-    static func render(_ text: String, maxW: Int, size: CGFloat, minSize: CGFloat = 16, byteLimit: Int? = nil) -> Img? {
+    static func render(_ text: String, maxW: Int, size: CGFloat, minSize: CGFloat = 16, byteLimit: Int? = nil, bold: Bool = true, fitWidth: Int? = nil) -> Img? {
         var t = text.trimmingCharacters(in: .whitespaces)
         if t.isEmpty { return nil }
         var fontSize = size
         func attrs(_ s: CGFloat) -> [NSAttributedString.Key: Any] {
-            [.font: UIFont.boldSystemFont(ofSize: s), .foregroundColor: UIColor.white]
+            [.font: bold ? UIFont.boldSystemFont(ofSize: s) : UIFont.systemFont(ofSize: s, weight: .regular), .foregroundColor: UIColor.white]
         }
         func width(_ s: String, _ fs: CGFloat) -> CGFloat { (s as NSString).size(withAttributes: attrs(fs)).width }
-        func height(_ fs:CGFloat)->Int {min(60,max(1,Int(ceil(UIFont.boldSystemFont(ofSize:fs).lineHeight))))}
+        func height(_ fs:CGFloat)->Int {min(60,max(1,Int(ceil((bold ? UIFont.boldSystemFont(ofSize: fs) : UIFont.systemFont(ofSize: fs)).lineHeight))))}
         func limit(_ fs:CGFloat)->Int {
             byteLimit.map{TextBitmapBudget.width(maximum:maxW,height:height(fs),bytes:$0)} ?? maxW
         }
-        while width(t, fontSize) > CGFloat(limit(fontSize)) && fontSize > minSize { fontSize -= 1 }
+        while width(t, fontSize) > CGFloat(min(limit(fontSize), fitWidth ?? maxW)) && fontSize > minSize { fontSize -= 1 }
         let allowed=limit(fontSize)
         guard allowed>0 else {return nil}
         if width(t, fontSize) > CGFloat(allowed) {
@@ -98,7 +98,7 @@ enum TextImage {
             t += "…"
         }
         guard width(t,fontSize)<=CGFloat(allowed) else {return nil}
-        let font = UIFont.boldSystemFont(ofSize: fontSize)
+        let font = bold ? UIFont.boldSystemFont(ofSize: fontSize) : UIFont.systemFont(ofSize: fontSize)
         let h = min(60, max(1, Int(ceil(font.lineHeight))))
         let w = min(allowed, max(1, Int(ceil(width(t, fontSize)))))
 
@@ -130,8 +130,8 @@ enum TextImage {
     }
 
     /// 画好直接发到圆屏某一栏；文字为空就清掉那一栏
-    static func send(slot: Int, _ text: String, maxW: Int, size: CGFloat, minSize: CGFloat) {
-        if let img = render(text, maxW: maxW, size: size, minSize: minSize) {
+    static func send(slot: Int, _ text: String, maxW: Int, size: CGFloat, minSize: CGFloat, byteLimit: Int? = nil, bold: Bool = true) {
+        if let img = render(text, maxW: maxW, size: size, minSize: minSize, byteLimit: byteLimit, bold: bold, fitWidth: slot == 12 ? 330 : nil) {
             BleLink.shared.sendImage(slot: slot, w: img.w, h: img.h, data: img.data)
         } else {
             BleLink.shared.sendImage(slot: slot, w: 0, h: 0, data: Data())
