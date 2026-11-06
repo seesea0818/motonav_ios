@@ -86,7 +86,9 @@ final class LyricsBridge {
         timeline = result.timeline; BleLink.shared.mediaLyricsStatus = result.status; tick()
     }
     private func tick() {
-        guard lyricsEnabled, let track = track, let timeline = timeline, let clock = clock else { sendLines(Array(repeating: "", count: 5)); return }
+        guard lyricsEnabled, let track = track, let timeline = timeline else { sendLines(Array(repeating: "", count: 5)); return }
+        guard let clock = clock else { BleLink.shared.mediaLyricsStatus = "等待播放器提供播放进度"; sendLines(Array(repeating: "", count: 5)); return }
+        if BleLink.shared.mediaLyricsStatus == "等待播放器提供播放进度" { BleLink.shared.mediaLyricsStatus = "逐句歌词已就绪 · LRCLIB" }
         sendLines(timeline.upcoming(at: clock.position(now: ProcessInfo.processInfo.systemUptime, duration: track.duration)))
     }
     private func sendLines(_ lines: [String]) {

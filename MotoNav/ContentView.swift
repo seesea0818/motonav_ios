@@ -731,6 +731,9 @@ struct ContentView: View {
                 if settings.musicLyrics {
                     Text(ble.mediaLyricsSupported ? "播放音乐后自动匹配歌词" : "请更新圆屏固件以显示歌词")
                         .font(.caption).foregroundColor(ContentView.cyan)
+                    if !ble.mediaLyricsStatus.isEmpty {
+                        Text(ble.mediaLyricsStatus).font(.caption).foregroundColor(ContentView.sub)
+                    }
                 }
                 Text("先在音乐 App 中播放，再用圆屏切歌或暂停。歌名和歌手由播放器提供。")
                     .font(.caption).foregroundColor(ContentView.sub)
