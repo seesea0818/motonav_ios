@@ -11,14 +11,33 @@ struct LyricsTrack: Equatable {
         if !album.isEmpty { url.queryItems?.append(URLQueryItem(name: "album_name", value: album)) }
         return url.url
     }
+    // 精确查询没有结果时，用简体和繁体搜索候选，不携带专辑筛选。
+    var searchURLs: [URL] {
+        let variants = [(title, artist),
+                        (title.applyingTransform(.traditionalToSimplified, reverse: true) ?? title,
+                         artist.applyingTransform(.traditionalToSimplified, reverse: true) ?? artist)]
+        var seen = Set<String>()
+        return variants.compactMap { pair in
+            let (title, artist) = pair
+            var components = URLComponents(string: "https://lrclib.net/api/search")!
+            components.queryItems = [URLQueryItem(name: "track_name", value: title), URLQueryItem(name: "artist_name", value: artist)]
+            guard let url = components.url, seen.insert(url.absoluteString).inserted else { return nil }
+            return url
+        }
+    }
     func matches(title: String, artist: String, album: String, duration: Double) -> Bool {
         func normalized(_ text: String) -> String {
-            text.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            (text.applyingTransform(.traditionalToSimplified, reverse: false) ?? text)
+                .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: Locale(identifier: "en_US_POSIX"))
                 .unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.map(String.init).joined()
         }
         return duration.isFinite && abs(self.duration - duration) <= 2.1 && normalized(self.title) == normalized(title)
             && normalized(self.artist) == normalized(artist)
             && (self.album.isEmpty || album.isEmpty || normalized(self.album) == normalized(album))
+    }
+    // 搜索候选的专辑可能是合辑，但歌曲、歌手和时长仍需严格一致。
+    func matchesSearch(title: String, artist: String, duration: Double) -> Bool {
+        matches(title: title, artist: artist, album: "", duration: duration)
     }
 }
 

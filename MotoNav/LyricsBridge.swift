@@ -56,27 +56,45 @@ final class LyricsBridge {
     private func fetch(_ track: LyricsTrack, token: UUID) {
         if let cached = cache[track.key], cached.expires > Date().timeIntervalSince1970 { apply(cached, track: track, token: token); return }
         guard let url = track.url else { return }
+        fetchCandidates([url] + track.searchURLs, index: 0, track: track, token: token, hadError: false)
+    }
+    // 先精确查找；失败时搜索候选并再次校验歌曲、歌手和时长。
+    private func fetchCandidates(_ urls: [URL], index: Int, track: LyricsTrack, token: UUID, hadError: Bool) {
+        guard self.token == token, key == track.key, lyricsEnabled else { return }
+        guard index < urls.count else {
+            let status = hadError ? "歌词服务暂不可用，保留歌名和歌手" : "未找到匹配的逐句歌词"
+            let result = Cached(timeline: nil, status: status, expires: Date().timeIntervalSince1970 + (hadError ? 60 : 600))
+            cache[track.key] = result; apply(result, track: track, token: token); return
+        }
+        let url = urls[index]
         var request = URLRequest(url: url); request.timeoutInterval = 12
         request.setValue("MotoNav/0.12.1 (iOS; optional synced lyrics)", forHTTPHeaderField: "User-Agent")
         task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            var result = Cached(timeline: nil, status: "歌词服务暂不可用，保留歌名和歌手", expires: Date().timeIntervalSince1970 + 60)
-            if (response as? HTTPURLResponse)?.statusCode == 404 { result.status = "未找到匹配的逐句歌词"; result.expires += 540 }
-            else if error == nil, (response as? HTTPURLResponse)?.statusCode == 200, let data = data, data.count <= 128 * 1024,
-                    let record = try? JSONDecoder().decode(Record.self, from: data),
-                    track.matches(title: record.trackName, artist: record.artistName, album: record.albumName ?? "", duration: record.duration) {
-                if record.instrumental == true { result.status = "纯音乐，没有歌词" }
-                else if let lrc = record.syncedLyrics {
-                    let timeline = LyricsTimeline(lrc)
-                    if timeline.cues.contains(where: { !$0.text.isEmpty }) { result = Cached(timeline: timeline, status: "逐句歌词已就绪 · LRCLIB", expires: Date().timeIntervalSince1970 + 86400) }
-                    else { result.status = "此歌曲暂无逐句歌词" }
-                } else { result.status = "此歌曲暂无逐句歌词" }
-                if result.timeline == nil { result.expires += 540 }
+            let status = (response as? HTTPURLResponse)?.statusCode
+            let failed = error != nil || (status != 200 && status != 404)
+            var records: [Record] = []
+            if error == nil, status == 200, let data = data, data.count <= 1024 * 1024 {
+                if index == 0, let record = try? JSONDecoder().decode(Record.self, from: data) { records = [record] }
+                else if index > 0, let found = try? JSONDecoder().decode([Record].self, from: data) { records = found }
             }
-            let resolved = result
+            let candidates = records.filter { record in
+                if index == 0 { return track.matches(title: record.trackName, artist: record.artistName, album: record.albumName ?? "", duration: record.duration) }
+                return track.matchesSearch(title: record.trackName, artist: record.artistName, duration: record.duration)
+            }.sorted { abs($0.duration - track.duration) < abs($1.duration - track.duration) }
+            let matched = candidates.compactMap { record -> LyricsTimeline? in
+                guard record.instrumental != true, let lrc = record.syncedLyrics else { return nil }
+                let timeline = LyricsTimeline(lrc)
+                return timeline.cues.contains(where: { !$0.text.isEmpty }) ? timeline : nil
+            }.first
             DispatchQueue.main.async {
                 guard let self = self, self.token == token, self.key == track.key, self.lyricsEnabled else { return }
-                if self.cache.count >= 20, let oldest = self.cache.min(by: { $0.value.expires < $1.value.expires })?.key { self.cache.removeValue(forKey: oldest) }
-                self.cache[track.key] = resolved; self.apply(resolved, track: track, token: token)
+                if let timeline = matched {
+                    let result = Cached(timeline: timeline, status: "逐句歌词已就绪 · LRCLIB", expires: Date().timeIntervalSince1970 + 86400)
+                    if self.cache.count >= 20, let oldest = self.cache.min(by: { $0.value.expires < $1.value.expires })?.key { self.cache.removeValue(forKey: oldest) }
+                    self.cache[track.key] = result; self.apply(result, track: track, token: token)
+                } else {
+                    self.fetchCandidates(urls, index: index + 1, track: track, token: token, hadError: hadError || failed)
+                }
             }
         }
         task?.resume()
