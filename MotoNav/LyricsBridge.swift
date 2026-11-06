@@ -30,7 +30,8 @@ final class LyricsBridge {
               let duration = Double(metadata.values[3].text), duration.isFinite, (1...3600).contains(duration) else {
             resetTrack(); BleLink.shared.mediaLyricsStatus = "等待完整歌曲信息"; return
         }
-        let incoming = LyricsTrack(title: metadata.title, artist: metadata.artist, album: metadata.album, duration: duration)
+        let identity = LyricsTrack.lookupIdentity(title: metadata.title, artist: metadata.artist)
+        let incoming = LyricsTrack(title: identity.title, artist: identity.artist, album: metadata.album, duration: duration)
         if incoming.key != key {
             resetTrack(); key = incoming.key; track = incoming
             BleLink.shared.mediaLyricsStatus = "正在匹配逐句歌词…"

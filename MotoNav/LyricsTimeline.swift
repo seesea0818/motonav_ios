@@ -5,6 +5,18 @@ struct LyricsTrack: Equatable {
     private static let chineseTransform = StringTransform(rawValue: "Traditional-Simplified")
     let title: String, artist: String, album: String
     let duration: Double
+    // 有些播放器把“歌名 - 歌手”放在标题，并用歌手字段推送当前歌词。
+    static func lookupIdentity(title: String, artist: String) -> (title: String, artist: String) {
+        for separator in [" — ", " – ", " - ", "—", "–"] {
+            let parts = title.components(separatedBy: separator)
+            if parts.count == 2 {
+                let song = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                let singer = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                if !song.isEmpty && !singer.isEmpty { return (song, singer) }
+            }
+        }
+        return (title, artist)
+    }
     var key: String { "\(title)\n\(artist)\n\(album)\n\(duration)" }
     var url: URL? {
         guard !title.isEmpty, !artist.isEmpty, duration.isFinite, (1...3600).contains(duration) else { return nil }
