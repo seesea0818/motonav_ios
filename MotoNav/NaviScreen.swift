@@ -52,6 +52,8 @@ struct AMapDriveViewRep: UIViewRepresentable {
         v.mapViewModeType = night ? .night : .day
         // 整合版：高德自带 UI（顶卡/底栏/logo/主页按钮/光柱）全部隐藏，改由 NaviScreen 自绘
         v.showUIElements = false
+        // 高德 10.0.2 起，原生视图展示路口图时回调图片可能为空；由页面统一展示。
+        v.showCrossImage = false
         v.screenAnchor = CGPoint(x: 0.5, y: 0.72)       // 仅 showUIElements=NO 时有效：车标偏下，前方视野更大
         controller.view = v
         AMapNaviDriveManager.sharedInstance().addDataRepresentative(v)
@@ -119,6 +121,14 @@ struct NaviScreen: View {
     private var topOverlay: some View {
         VStack(spacing: 10) {
             turnCard
+            if let image = navi.crossImage {
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: 500, maxHeight: 220)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .accessibilityLabel("路口放大图")
+            }
             if navi.uiSuggestMin > 0 {                  // iOS v0.2 高德发现更快的路线
                 HStack {
                     Text("发现更快路线，能省约 \(navi.uiSuggestMin) 分钟")

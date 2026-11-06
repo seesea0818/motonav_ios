@@ -1,6 +1,7 @@
 import Foundation
 import ObjectiveC
 import CoreLocation
+import UIKit
 
 /// 版本：跟随 App 版本（见 Config.swift）
 ///
@@ -51,6 +52,7 @@ final class NaviBridge: NSObject, ObservableObject {
     @Published var camRaw = "（还没收到电子眼信息）"
     @Published var extraInfo = ""
     @Published var showArrived = false              // 刚到达目的地（手机和圆屏显示“已到达”4 秒）
+    @Published var crossImage: UIImage?             // 高德提供的路口放大图
     private var arriveSeq = 0
     // iOS v0.3 选路线
     struct RouteOption: Identifiable {
@@ -426,6 +428,7 @@ final class NaviBridge: NSObject, ObservableObject {
         if arrived {
             guard let event = event, arrival.complete(token, event: event) else { return }
         } else { arrival.cancel(token) }
+        crossImage = nil
         RideRecorder.shared.finish()
         LocationService.shared.setPrecise(false)
         MapFeeder.shared.onNaviEnd()
@@ -458,6 +461,7 @@ final class NaviBridge: NSObject, ObservableObject {
     }
 
     private func resetState() {
+        crossImage = nil
         tripMeters = 0; tripMaxKmh = 0; tripStarted = Date(); tripPosition = nil
         curDir = ""; curAngle = nil; angleKey = ""; lastRouteKey = ""
         baseDist = 0; speedMps = 0
@@ -1032,6 +1036,10 @@ extension NaviBridge {
 
     @objc(driveManagerOnArrivedDestination:)
     func mnArrived(_ m: AMapNaviDriveManager) { finish("A,0", "已到达目的地", event: .destination) }
+
+    // 高德没有提供图片时清除旧图，避免错误展示上一个路口。
+    func mnCrossShow(_ image: UIImage?) { if navigating { crossImage = image } }
+    func mnCrossHide() { crossImage = nil }
 
     @objc(driveManagerDidEndEmulatorNavi:)
     func mnEmuEnd(_ m: AMapNaviDriveManager) { finish("A,0", "模拟导航结束", event: .emulator) }

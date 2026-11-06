@@ -1,5 +1,8 @@
 import Foundation
 import ObjectiveC
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// SDK callbacks belong to the navigation/planning/cruise session that registered them.
 /// Retained old delegates and callbacks already queued on the main thread are ignored.
@@ -95,6 +98,19 @@ final class NaviSessionCallbacks: NSObject {
     func mnCameras(_ m: AMapNaviDriveManager, cams: [AMapNaviCameraInfo]?) {
         deliver { bridge in bridge.mnCameras(m, cams: cams) }
     }
+
+    #if canImport(UIKit)
+    // 图片沿用导航会话的代次检查，防止旧导航的回调覆盖新页面。
+    @objc(driveManager:showCrossImage:)
+    func mnCrossShow(_ m: AMapNaviDriveManager, image: UIImage?) {
+        deliver { bridge in bridge.mnCrossShow(image) }
+    }
+
+    @objc(driveManagerHideCrossImage:)
+    func mnCrossHide(_ m: AMapNaviDriveManager) {
+        deliver { bridge in bridge.mnCrossHide() }
+    }
+    #endif
 
     @objc(driveManager:showLaneBackInfo:laneSelectInfo:)
     func mnLaneShow(_ m: AMapNaviDriveManager, back: String?, select: String?) {
