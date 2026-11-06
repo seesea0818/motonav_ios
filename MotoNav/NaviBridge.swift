@@ -53,6 +53,10 @@ final class NaviBridge: NSObject, ObservableObject {
     @Published var extraInfo = ""
     @Published var showArrived = false              // 刚到达目的地（手机和圆屏显示“已到达”4 秒）
     @Published var crossImage: UIImage?             // 高德提供的路口放大图
+    private var crossRevision: UInt64 = 0
+    private var crossPacketID = 0
+    private var crossShownAt = Date.distantPast
+    private let crossWorker = DispatchQueue(label: "motonav.cross-image", qos: .userInitiated)
     private var arriveSeq = 0
     // iOS v0.3 选路线
     struct RouteOption: Identifiable {
@@ -428,7 +432,7 @@ final class NaviBridge: NSObject, ObservableObject {
         if arrived {
             guard let event = event, arrival.complete(token, event: event) else { return }
         } else { arrival.cancel(token) }
-        crossImage = nil
+        mnCrossHide()
         RideRecorder.shared.finish()
         LocationService.shared.setPrecise(false)
         MapFeeder.shared.onNaviEnd()
@@ -461,7 +465,7 @@ final class NaviBridge: NSObject, ObservableObject {
     }
 
     private func resetState() {
-        crossImage = nil
+        mnCrossHide()
         tripMeters = 0; tripMaxKmh = 0; tripStarted = Date(); tripPosition = nil
         curDir = ""; curAngle = nil; angleKey = ""; lastRouteKey = ""
         baseDist = 0; speedMps = 0
@@ -1038,8 +1042,32 @@ extension NaviBridge {
     func mnArrived(_ m: AMapNaviDriveManager) { finish("A,0", "已到达目的地", event: .destination) }
 
     // 高德没有提供图片时清除旧图，避免错误展示上一个路口。
-    func mnCrossShow(_ image: UIImage?) { if navigating { crossImage = image } }
-    func mnCrossHide() { crossImage = nil }
+    func mnCrossShow(_ image: UIImage?) {
+        guard navigating else { return }
+        mnCrossHide()
+        guard let image = image else { return }
+        crossImage = image; crossShownAt = Date()
+        resendCrossImage()
+    }
+    func mnCrossHide() {
+        crossRevision &+= 1; crossImage = nil; crossShownAt = .distantPast
+        BleLink.shared.hideCrossImage()
+    }
+    func resendCrossImage() {
+        guard navigating, let image = crossImage, Date().timeIntervalSince(crossShownAt) < 10,
+              BleLink.shared.isReady, BleLink.shared.verified, BleLink.shared.crossSupported else { return }
+        crossRevision &+= 1
+        let revision = crossRevision
+        crossWorker.async { [weak self] in
+            guard let data = CrossImageEncoder.encode(image) else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, self.crossRevision == revision, self.navigating,
+                      self.crossImage != nil, Date().timeIntervalSince(self.crossShownAt) < 10 else { return }
+                self.crossPacketID = (self.crossPacketID + 1) & 255
+                BleLink.shared.sendCrossImage(id: self.crossPacketID, data: data)
+            }
+        }
+    }
 
     @objc(driveManagerDidEndEmulatorNavi:)
     func mnEmuEnd(_ m: AMapNaviDriveManager) { finish("A,0", "模拟导航结束", event: .emulator) }

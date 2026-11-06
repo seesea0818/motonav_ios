@@ -36,6 +36,9 @@ final class BleLink: NSObject, ObservableObject {
     @Published private(set) var mediaHIDReady = false
     @Published private(set) var mediaHIDMode = false
     @Published private(set) var verified = false
+    private(set) var crossSupported = false
+    private var crossPendingID: Int?
+    private var crossPendingUntil = Date.distantPast
     private var buildingProbe = BleCapabilityProbe()
     private var buildingQueries: Int { buildingProbe.attempts }
     private var txNotifyReady = false
@@ -185,7 +188,7 @@ final class BleLink: NSObject, ObservableObject {
         isReady = false; txNotifyReady = false
         screenName=p.name ?? "MotoNav";screenBattery=nil;screenCharging=false
         buildingsSupported = false
-        mediaHIDSupported = false; mediaHIDReady = false; mediaHIDMode = false; mediaLyricsSupported = false; mediaLyricsActive = false; mediaAMSControls = 0; verified = false; buildingProbe.reset()
+        mediaHIDSupported = false; mediaHIDReady = false; mediaHIDMode = false; mediaLyricsSupported = false; mediaLyricsActive = false; mediaAMSControls = 0; verified = false; crossSupported = false; crossPendingID = nil; buildingProbe.reset()
         MusicBridge.shared.resetAMS()
         peripheral = p
         p.delegate = self
@@ -365,6 +368,20 @@ final class BleLink: NSObject, ObservableObject {
         bulkQ.contains(type:type,id:id) || (type==3 && mapReceipt.blocks(id:id,now:ProcessInfo.processInfo.systemUptime))
     }
     func cancelMapTransfers() {bulkQ.cancel(types:[1,3]);mapReceipt.reset();mapMeter.cancel()}
+    // 路口图必须在固件确认接收完成后才显示。
+    func sendCrossImage(id: Int, data: Data) {
+        guard isReady, verified, crossSupported, data.count <= 65536, maxWrite - BULK_HEADER >= 100 else { return }
+        crossPendingID = id
+        crossPendingUntil = Date().addingTimeInterval(10)
+        sendOnce("#X,0")
+        sendBulk(type: 5, id: id, data: data)
+    }
+    func hideCrossImage() {
+        crossPendingID = nil
+        crossPendingUntil = .distantPast
+        bulkQ.cancel(types: [5])
+        if isReady && verified && crossSupported { sendOnce("#X,0") }
+    }
     func mapPayloadRemaining(id:Int)->Int {bulkQ.payloadRemaining(type:3,id:id)}
     @Published var bulkKB = 0                         // 累计发了多少 KB 地图数据（调试用）
 
@@ -537,7 +554,7 @@ final class BleLink: NSObject, ObservableObject {
 extension BleLink: CBCentralManagerDelegate, CBPeripheralDelegate {
     func centralManagerDidUpdateState(_ c: CBCentralManager) {
         if c.state != .poweredOn {
-            isReady = false; txNotifyReady = false; buildingsSupported = false; mediaHIDSupported = false; mediaHIDReady = false; mediaHIDMode = false; mediaLyricsSupported = false; mediaLyricsActive = false; mediaAMSControls = 0; verified = false; buildingProbe.reset()
+            isReady = false; txNotifyReady = false; buildingsSupported = false; mediaHIDSupported = false; mediaHIDReady = false; mediaHIDMode = false; mediaLyricsSupported = false; mediaLyricsActive = false; mediaAMSControls = 0; verified = false; crossSupported = false; crossPendingID = nil; buildingProbe.reset()
         MusicBridge.shared.resetAMS()
         }
         switch c.state {
@@ -573,7 +590,7 @@ extension BleLink: CBCentralManagerDelegate, CBPeripheralDelegate {
     func centralManager(_ c: CBCentralManager, didFailToConnect p: CBPeripheral, error: Error?) {
         guard p === peripheral else { return }
         status = "连接失败，重试中…"
-        mediaHIDSupported = false; mediaHIDReady = false; mediaHIDMode = false; mediaLyricsSupported = false; mediaLyricsActive = false; mediaAMSControls = 0; verified = false; buildingProbe.reset(); txNotifyReady = false
+        mediaHIDSupported = false; mediaHIDReady = false; mediaHIDMode = false; mediaLyricsSupported = false; mediaLyricsActive = false; mediaAMSControls = 0; verified = false; crossSupported = false; crossPendingID = nil; buildingProbe.reset(); txNotifyReady = false
         MusicBridge.shared.resetAMS()
         isReady = false
         connectionRetries+=1
@@ -591,7 +608,7 @@ extension BleLink: CBCentralManagerDelegate, CBPeripheralDelegate {
         bulkQ.reset(); bulkBarrier.reset(); bulkWriteSerial += 1
         mapReceipt.reset();mapMeter.reset();lastWasCommand=false
         buildingsSupported = false
-        mediaHIDSupported = false; mediaHIDReady = false; mediaHIDMode = false; mediaLyricsSupported = false; mediaLyricsActive = false; mediaAMSControls = 0; verified = false; buildingProbe.reset(); txNotifyReady = false
+        mediaHIDSupported = false; mediaHIDReady = false; mediaHIDMode = false; mediaLyricsSupported = false; mediaLyricsActive = false; mediaAMSControls = 0; verified = false; crossSupported = false; crossPendingID = nil; buildingProbe.reset(); txNotifyReady = false
         MusicBridge.shared.resetAMS()
         MapFeeder.shared.onBuildingCapability()
         rxChar = nil;txChar=nil
@@ -655,6 +672,7 @@ extension BleLink: CBCentralManagerDelegate, CBPeripheralDelegate {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if BleAuthenticatedReply.accepts(s), !verified {
             verified = true; syncPhoneClock(force:true); buildingProbe.reset(); requestBuildingCapability(); Settings.shared.pushAll(); MapFeeder.shared.resendAll()
+            if crossSupported { NaviBridge.shared.resendCrossImage() }
         }
         if s == "U,1" {return}
         if s == "CAP,HID,1" {
@@ -665,6 +683,12 @@ extension BleLink: CBCentralManagerDelegate, CBPeripheralDelegate {
         if s == "CAP,LYR,1" {
             mediaLyricsSupported = true
             MusicBridge.shared.syncMode(); MusicBridge.shared.refresh(force: true); return
+        }
+        if s == "CAP,CROSS,1" {
+            let wasSupported = crossSupported
+            crossSupported = true
+            if !wasSupported { NaviBridge.shared.resendCrossImage() }
+            return
         }
         if s == "CAP,BLD,1" {
             if !buildingsSupported { buildingsSupported = true; MapFeeder.shared.onBuildingCapability() }
@@ -696,6 +720,11 @@ extension BleLink: CBCentralManagerDelegate, CBPeripheralDelegate {
                 mapReceipt.acknowledge(id:id)
             }
             bulkQ.acknowledge(type: t, id: id)
+            if t == 5 && crossPendingID == id {
+                crossPendingID = nil
+                if Date() < crossPendingUntil { sendOnce("#X,1") }
+                crossPendingUntil = .distantPast
+            }
             MapFeeder.shared.onAck(type: t, id: id)
             return
         }
