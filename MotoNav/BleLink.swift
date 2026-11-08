@@ -78,7 +78,7 @@ final class BleLink: NSObject, ObservableObject {
     private var lastState: [String: String] = [:]          // 文字状态（重连后补发）
     private var stateOrder: [String] = []
     private var lastImg: [Int: (w: Int, h: Int, data: Data)] = [:]
-    private var imgId = [Int](repeating: 0, count: 17)
+    private var imgId = [Int](repeating: 0, count: 21)
     private var phoneClock=PhoneClockSync()
     private var clockWriteID=0
     private var clockObserver:NSObjectProtocol?

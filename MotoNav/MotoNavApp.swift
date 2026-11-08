@@ -1,4 +1,77 @@
 import SwiftUI
+import Combine
+
+// 圆屏只持有收藏快照和路线编号，坐标与规划仍由手机管理。
+final class ScreenFavorites {
+    static let shared = ScreenFavorites()
+    private var revision = 0, offset = 0, token = 0, planRevision = -1
+    private var snapshot: [Favorites.Place] = []
+    private var routeIDs: [Int] = []
+    private var timer: Timer?
+    private var observation: AnyCancellable?
+    private init() {
+        observation = Favorites.shared.$places.dropFirst().sink { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self = self, BleLink.shared.isReady, BleLink.shared.verified else { return }
+                self.publish(offset: self.offset)
+            }
+        }
+    }
+    func publish(offset requested: Int) {
+        guard BleLink.shared.isReady, BleLink.shared.verified else { return }
+        timer?.invalidate(); timer = nil; routeIDs = []
+        snapshot = Favorites.shared.places; revision = revision == 65535 ? 1 : revision + 1
+        offset = max(0, min(requested, snapshot.count == 0 ? 0 : ((snapshot.count - 1) / 4) * 4))
+        let items = Array(snapshot.dropFirst(offset).prefix(4))
+        BleLink.shared.sendOnce("#FV,\(revision),\(offset),\(items.count),\(snapshot.count)")
+        let limit = TextBitmapBudget.bytes(maxWrite: BleLink.shared.maxWrite)
+        for i in 0..<4 {
+            TextImage.send(slot: 17+i, i < items.count ? items[i].name : "", maxW: 280, size: 23, minSize: 16, byteLimit: limit)
+        }
+    }
+    func receive(_ parts: [String]) {
+        guard parts.count >= 3, BleLink.shared.isReady, BleLink.shared.verified else { return }
+        let navi = NaviBridge.shared
+        switch parts[2] {
+        case "LIST": publish(offset: parts.count > 3 ? (Int(parts[3]) ?? 0) : 0)
+        case "PLAN":
+            guard parts.count >= 5, let rev=Int(parts[3]), let index=Int(parts[4]), rev==revision,
+                  snapshot.indices.contains(index), Favorites.shared.places.contains(where: { $0.id == snapshot[index].id }),
+                  !Settings.shared.amapKeyInUse.isEmpty, BleLink.shared.maxWrite >= 40 else { BleLink.shared.sendOnce("#FE"); return }
+            timer?.invalidate(); routeIDs=[]; token = token == 65535 ? 1 : token + 1
+            let place=snapshot[index]
+            if WebMotorSession.shared.running { WebMotorSession.shared.stop() }
+            if navi.navigating { navi.stop() }
+            navi.plan(toLat: place.lat, lng: place.lng)
+            planRevision=navi.screenPlanRevision
+            let expected=token, started=Date()
+            timer=Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] timer in
+                guard let self=self, self.token==expected, BleLink.shared.isReady else { timer.invalidate(); return }
+                guard navi.screenPlanRevision==self.planRevision else { BleLink.shared.sendOnce("#FE"); timer.invalidate(); self.timer=nil; return }
+                if navi.routeReady && !navi.routeOptions.isEmpty {
+                    let options=Array(navi.routeOptions.prefix(3)); self.routeIDs=options.map { $0.id }
+                    BleLink.shared.sendOnce("#FR,\(expected),\(options.count)")
+                    for (i, route) in options.enumerated() {
+                        let tag = route.label.contains("推荐") ? 1 : route.label.contains("常规") ? 2 : route.label.contains("少灯") ? 3 : 0
+                        BleLink.shared.sendOnce("#F\(i),\(expected),\(route.timeS),\(route.length),\(route.lights),\(tag)")
+                    }
+                    timer.invalidate(); self.timer=nil
+                } else if navi.planFailed || Date().timeIntervalSince(started)>25 {
+                    BleLink.shared.sendOnce("#FE"); timer.invalidate(); self.timer=nil
+                }
+            }
+        case "GO":
+            guard parts.count >= 5, let t=Int(parts[3]), let index=Int(parts[4]), t==token,
+                  routeIDs.indices.contains(index), navi.routeReady, !navi.navigating,
+                  navi.screenPlanRevision==planRevision, navi.routeOptions.contains(where: { $0.id==routeIDs[index] }) else { BleLink.shared.sendOnce("#FE"); return }
+            guard navi.select(routeID: routeIDs[index]) else { BleLink.shared.sendOnce("#FE"); return }
+            navi.start(emulate: false)
+            BleLink.shared.sendOnce(navi.navigating ? "#FG" : "#FE")
+            routeIDs=[]
+        default: break
+        }
+    }
+}
 
 /// 版本：跟随 App 版本（见 Config.swift）
 ///
@@ -36,6 +109,7 @@ struct MotoNavApp: App {
         // 圆屏发来的通知
         BleLink.shared.onNotify = { msg in
             let p = msg.split(separator: ",").map(String.init)
+            if p.count >= 3, p[0] == "T", p[1] == "F" { ScreenFavorites.shared.receive(p); return }
             if p.first == "BOOT", p.count >= 2, let id = Int(p[1]) { Settings.shared.bootReply(id); return }
             if p.count >= 3, p[0] == "T", p[1] == "CR" {
                 if p[2] == "START" {

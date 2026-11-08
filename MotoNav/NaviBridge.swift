@@ -74,6 +74,8 @@ final class NaviBridge: NSObject, ObservableObject {
     var destCoord: CLLocationCoordinate2D? { destLat.isNaN ? nil : CLLocationCoordinate2D(latitude: destLat, longitude: destLng) }
     private var destLat = Double.nan, destLng = Double.nan
     private var planSeq = 0
+    // 圆屏选择路线时校验规划版本，防止使用已过期的路线编号。
+    var screenPlanRevision: Int { planSeq }
     private var lastRouteDoneAt = Date.distantPast
     // iOS v0.3 巡航
     @Published var cruising = false
@@ -336,14 +338,16 @@ final class NaviBridge: NSObject, ObservableObject {
     }
 
     /// 选一条路线（开始导航时用这条）
-    func select(routeID: Int) {
+    @discardableResult
+    func select(routeID: Int) -> Bool {
+        guard manager.selectNaviRoute(withRouteID: routeID) else { return false }
         selectedRouteID = routeID
-        _ = manager.selectNaviRoute(withRouteID: routeID)
         if let o = routeOptions.first(where: { $0.id == routeID }) {
             routeSummary = "\(NaviBridge.distText(o.length))，约 \(NaviBridge.durText(o.timeS))"
             MapFeeder.shared.prepareRoute(key: "selected-\(routeID)", coords: o.coords.map { (lat: $0.latitude, lng: $0.longitude) })
         }
         checkShareMatch()
+        return true
     }
 
     static func distText(_ m: Int) -> String { m >= 1000 ? String(format: "%.1f 公里", Double(m) / 1000) : "\(m) 米" }
