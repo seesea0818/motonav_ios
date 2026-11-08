@@ -1,5 +1,49 @@
 import SwiftUI
 import Combine
+import ObjectiveC
+
+// 独立搜索候选路线，不触碰正在导航的引擎。
+private final class ScreenRouteSearch: NSObject {
+    struct Option { let seconds: Int, meters: Int, lights: Int, tag: Int; let points: [MotorPoint] }
+    private var api: AMapSearchAPI?
+    private var completion: (([Option]) -> Void)?
+    private var timeout: DispatchWorkItem?
+    override init() { super.init(); class_addProtocol(ScreenRouteSearch.self, AMapSearchDelegate.self) }
+    func cancel() { timeout?.cancel(); timeout=nil; completion=nil; api?.delegate=nil; api?.cancelAllRequests(); api=nil }
+    func start(from: MotorPoint, to: MotorPoint, done: @escaping ([Option]) -> Void) {
+        cancel(); completion=done
+        let search=AMapSearchAPI(); api=search; search.delegate=(self as AnyObject) as? AMapSearchDelegate
+        let request=AMapDrivingRouteSearchRequest()
+        request.origin=AMapGeoPoint.location(withLatitude:CGFloat(from.lat),longitude:CGFloat(from.lng))
+        request.destination=AMapGeoPoint.location(withLatitude:CGFloat(to.lat),longitude:CGFloat(to.lng))
+        request.strategy=Settings.shared.avoidHighway ? 15 : 10
+        request.requireExtension=true
+        let work=DispatchWorkItem { [weak self] in self?.finish([]) }
+        timeout=work; DispatchQueue.main.asyncAfter(deadline:.now()+20,execute:work)
+        search.aMapDrivingRouteSearch(request)
+    }
+    private func finish(_ options: [Option]) {
+        if !Thread.isMainThread { DispatchQueue.main.async { [weak self] in self?.finish(options) }; return }
+        guard let done=completion else { return }; completion=nil
+        timeout?.cancel(); timeout=nil; api?.delegate=nil; api=nil; done(options)
+    }
+    @objc(onRouteSearchDone:response:)
+    func completed(_ request: AMapRouteSearchBaseRequest?, response: AMapRouteSearchResponse?) {
+        let options=(response?.route?.paths ?? []).prefix(3).enumerated().compactMap { index, path -> Option? in
+            let lines=(path.steps ?? []).compactMap { $0.polyline }
+            let source=lines.isEmpty ? (path.polyline ?? "") : lines.joined(separator:";")
+            let points=source.split(separator:";").compactMap { pair -> MotorPoint? in
+                let xy=pair.split(separator:","); guard xy.count==2, let lng=Double(xy[0]), let lat=Double(xy[1]), MotorRequest.valid(lat,lng) else { return nil }
+                return MotorPoint(lat:lat,lng:lng)
+            }
+            guard points.count>=2, path.distance>0, path.duration>0 else { return nil }
+            return Option(seconds:path.duration,meters:path.distance,lights:path.totalTrafficLights,tag:index == 0 ? 1 : 0,points:points)
+        }
+        finish(options)
+    }
+    @objc(AMapSearchRequest:didFailWithError:)
+    func failed(_ request: Any?, error: NSError?) { finish([]) }
+}
 
 // 圆屏只持有收藏快照和路线编号，坐标与规划仍由手机管理。
 final class ScreenFavorites {
@@ -7,6 +51,9 @@ final class ScreenFavorites {
     private var revision = 0, offset = 0, token = 0, planRevision = -1
     private var snapshot: [Favorites.Place] = []
     private var routeIDs: [Int] = []
+    private var previews: [ScreenRouteSearch.Option] = []
+    private var previewDestination: Favorites.Place?
+    private let previewSearch = ScreenRouteSearch()
     private var timer: Timer?
     private var observation: AnyCancellable?
     private init() {
@@ -19,7 +66,7 @@ final class ScreenFavorites {
     }
     func publish(offset requested: Int) {
         guard BleLink.shared.isReady, BleLink.shared.verified else { return }
-        timer?.invalidate(); timer = nil; routeIDs = []
+        timer?.invalidate(); timer = nil; routeIDs = []; previews=[]; previewDestination=nil; previewSearch.cancel()
         snapshot = Favorites.shared.places; revision = revision == 65535 ? 1 : revision + 1
         offset = max(0, min(requested, snapshot.count == 0 ? 0 : ((snapshot.count - 1) / 4) * 4))
         let items = Array(snapshot.dropFirst(offset).prefix(4))
@@ -40,8 +87,21 @@ final class ScreenFavorites {
                   !Settings.shared.amapKeyInUse.isEmpty, BleLink.shared.maxWrite >= 40 else { BleLink.shared.sendOnce("#FE"); return }
             timer?.invalidate(); routeIDs=[]; token = token == 65535 ? 1 : token + 1
             let place=snapshot[index]
-            if WebMotorSession.shared.running { WebMotorSession.shared.stop() }
-            if navi.navigating { navi.stop() }
+            if navi.navigating || navi.cruising || WebMotorSession.shared.running {
+                guard let position=navi.myPosition() else { BleLink.shared.sendOnce("#FE"); return }
+                let expected=token; previewDestination=place; previews=[]
+                previewSearch.start(from:MotorPoint(lat:position.lat,lng:position.lng),to:MotorPoint(lat:place.lat,lng:place.lng)) { [weak self] options in
+                    guard let self=self, self.token==expected, BleLink.shared.isReady else { return }
+                    guard !options.isEmpty else { BleLink.shared.sendOnce("#FE"); return }
+                    self.previews=options
+                    BleLink.shared.sendOnce("#FR,\(expected),\(options.count)")
+                    for (i, route) in options.enumerated() {
+                        BleLink.shared.sendOnce("#F\(i),\(expected),\(route.seconds),\(route.meters),\(route.lights),\(route.tag)")
+                    }
+                }
+                return
+            }
+            previews=[]; previewDestination=nil; previewSearch.cancel()
             navi.plan(toLat: place.lat, lng: place.lng)
             planRevision=navi.screenPlanRevision
             let expected=token, started=Date()
@@ -61,6 +121,46 @@ final class ScreenFavorites {
                 }
             }
         case "GO":
+            if parts.count >= 5, let t=Int(parts[3]), let index=Int(parts[4]), t==token,
+               previews.indices.contains(index), let place=previewDestination {
+                let selected=previews[index], expected=token
+                previews=[]; previewDestination=nil
+                if WebMotorSession.shared.running { WebMotorSession.shared.stop() }
+                if navi.navigating { navi.stop() }
+                if navi.cruising { navi.stopCruise() }
+                navi.plan(toLat:place.lat,lng:place.lng); planRevision=navi.screenPlanRevision
+                let started=Date()
+                timer?.invalidate()
+                timer=Timer.scheduledTimer(withTimeInterval:0.25,repeats:true) { [weak self] timer in
+                    guard let self=self, self.token==expected, BleLink.shared.isReady else { timer.invalidate(); return }
+                    guard navi.screenPlanRevision==self.planRevision else { BleLink.shared.sendOnce("#FE"); timer.invalidate(); self.timer=nil; return }
+                    if navi.routeReady && !navi.routeOptions.isEmpty {
+                        let shape=RouteShape(points:selected.points), total=shape.cum.last ?? 0
+                        let match=navi.routeOptions.first { route in
+                            let points=route.coords.map { MotorPoint(lat:$0.latitude,lng:$0.longitude) }
+                            guard points.count>=2, total>0 else { return false }
+                            let candidate=RouteShape(points:points)
+                            guard let candidateTotal=candidate.cum.last, candidateTotal>0,
+                                  abs(candidateTotal-total)/total < 0.15 else { return false }
+                            var lastAlong = -1.0
+                            for index in 1...19 {
+                                let point=shape.at(total*Double(index)/20)
+                                guard let projection=candidate.projections(point,maximum:35)
+                                    .filter({ $0.along >= lastAlong }).min(by: { $0.offset < $1.offset }) else { return false }
+                                lastAlong=projection.along
+                            }
+                            return true
+                        }
+                        if let route=match, navi.select(routeID:route.id) {
+                            navi.start(emulate:false); BleLink.shared.sendOnce(navi.navigating ? "#FG" : "#FE")
+                        } else { BleLink.shared.sendOnce("#FE") }
+                        timer.invalidate(); self.timer=nil
+                    } else if navi.planFailed || Date().timeIntervalSince(started)>25 {
+                        BleLink.shared.sendOnce("#FE"); timer.invalidate(); self.timer=nil
+                    }
+                }
+                return
+            }
             guard parts.count >= 5, let t=Int(parts[3]), let index=Int(parts[4]), t==token,
                   routeIDs.indices.contains(index), navi.routeReady, !navi.navigating,
                   navi.screenPlanRevision==planRevision, navi.routeOptions.contains(where: { $0.id==routeIDs[index] }) else { BleLink.shared.sendOnce("#FE"); return }
