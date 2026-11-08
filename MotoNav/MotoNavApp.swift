@@ -12,7 +12,8 @@ private final class ScreenRouteSearch: NSObject {
     func cancel() { timeout?.cancel(); timeout=nil; completion=nil; api?.delegate=nil; api?.cancelAllRequests(); api=nil }
     func start(from: MotorPoint, to: MotorPoint, done: @escaping ([Option]) -> Void) {
         cancel(); completion=done
-        let search=AMapSearchAPI(); api=search; search.delegate=(self as AnyObject) as? AMapSearchDelegate
+        guard let search=AMapSearchAPI() else { finish([]); return }
+        api=search; search.delegate=(self as AnyObject) as? AMapSearchDelegate
         let request=AMapDrivingRouteSearchRequest()
         request.origin=AMapGeoPoint.location(withLatitude:CGFloat(from.lat),longitude:CGFloat(from.lng))
         request.destination=AMapGeoPoint.location(withLatitude:CGFloat(to.lat),longitude:CGFloat(to.lng))
