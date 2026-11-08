@@ -37,6 +37,16 @@ struct MotoNavApp: App {
         BleLink.shared.onNotify = { msg in
             let p = msg.split(separator: ",").map(String.init)
             if p.first == "BOOT", p.count >= 2, let id = Int(p[1]) { Settings.shared.bootReply(id); return }
+            if p.count >= 3, p[0] == "T", p[1] == "CR" {
+                if p[2] == "START" {
+                    guard !Settings.shared.amapKeyInUse.isEmpty else { BleLink.shared.sendOnce("#CR,KEY"); return }
+                    if NaviBridge.shared.startCruise() != nil { BleLink.shared.sendOnce("#CR,BUSY") }
+                } else if p[2] == "STOP" {
+                    if NaviBridge.shared.cruising { NaviBridge.shared.stopCruise() }
+                    else { BleLink.shared.sendOnce("#CR,IDLE") }
+                }
+                return
+            }
             if p.count >= 3, p[0] == "T", p[1] == "M" { MusicBridge.shared.handle(p[2]); return }
             if p.first == "T", p.count >= 2 {
                 switch p[1] {
