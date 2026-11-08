@@ -447,7 +447,8 @@ struct WebMotorView: View {
     var body: some View {
         Group {
             if guide.running || guide.arrived { IndependentNavigationView() }
-            else { IndependentPlannerView(mode:mode) }
+            // 分享新路线时重建规划页，让页面读取新的起终点与路线。
+            else { IndependentPlannerView(mode:mode).id(guide.route?.id) }
         }.preferredColorScheme(.dark)
     }
 }

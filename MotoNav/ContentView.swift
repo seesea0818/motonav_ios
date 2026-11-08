@@ -24,6 +24,7 @@ struct ContentView: View {
     @Environment(\.horizontalSizeClass) private var hSizeClass
     @State private var uiStarted=false
     @AppStorage("ui_selected_tab") private var page = 0
+    @AppStorage("share_auto_start_navigation") private var autoStartSharedRoute=false
     @State private var showWebMotor = false
     @State private var independentMode: IndependentMode = .motorcycle
     @State private var showRides = false
@@ -70,7 +71,17 @@ struct ContentView: View {
                 }.background(Self.bg.ignoresSafeArea()).navigationBarHidden(true)
             }.navigationViewStyle(.stack).id(page)
         }
-        .fullScreenCover(isPresented: $showWebMotor) { WebMotorView(mode:independentMode) }
+        .fullScreenCover(isPresented: $showWebMotor) {
+            WebMotorView(mode:independentMode)
+                .onOpenURL(perform: handleShareURL)
+                .overlay(alignment: .top) {
+                    if (shareBusy || !pendingShare.isEmpty) && !shareStatus.isEmpty {
+                        Text(Self.userMessage(shareStatus)).font(.footnote)
+                            .padding(10).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+                            .padding(.horizontal, 20).padding(.top, 8).allowsHitTesting(false)
+                    }
+                }
+        }
         .sheet(isPresented: $showRides) { NavigationView { RideHistoryView() } }
         .sheet(isPresented:$showScreens) { screenPicker }
         .sheet(isPresented:$showMapReport){MapSampleReportView()}
@@ -102,12 +113,15 @@ struct ContentView: View {
                 showKeys = true
             }
         }
-        .onOpenURL { url in                            // iOS v0.4 高德里“分享到 MotoNav”：motonav://share?t=分享的文字
-            guard url.scheme == "motonav",
-                  let t = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "t" })?.value
-            else { return }
-            importShare(t)
-        }
+        .onOpenURL(perform: handleShareURL)
+    }
+
+    // 首页和全屏路线页面共用分享入口。
+    private func handleShareURL(_ url: URL) {
+        guard url.scheme == "motonav", url.host == "share",
+              let text = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "t" })?.value
+        else { return }
+        importShare(text)
     }
 
     private var activeNavigationBanner: some View {
@@ -677,8 +691,17 @@ struct ContentView: View {
                 History.shared.add(SearchService.Place(name:name,address:"",lat:r.endLat,lng:r.endLng))
                 query=name;search.clear()
                 if r.kind=="自行车" || r.kind=="摩托车"{
-                    navi.clearPlan();WebMotorSession.shared.route=MotorRoutes.fromShare(r)
+                    navi.clearPlan()
+                    let route=MotorRoutes.fromShare(r)
+                    WebMotorSession.shared.route=route
                     independentMode=r.kind=="自行车" ? .bicycle:.motorcycle;showWebMotor=true
+                    if autoStartSharedRoute {
+                        // 仅对成功导入的分享路线启动真实导航。
+                        WebMotorSession.shared.start(route,simulate:false)
+                        if !WebMotorSession.shared.running {
+                            pendingShare=t; shareStatus="路线已导入，但未能开始导航，请检查路线后重试"
+                        }
+                    }
                 }else if !needAmapKey(){navi.plan(toLat:r.endLat,lng:r.endLng,share:r)}
             }catch{
                 guard shareImportID==sequence else{return}

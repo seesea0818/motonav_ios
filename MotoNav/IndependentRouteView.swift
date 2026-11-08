@@ -69,6 +69,7 @@ struct MotorLoginView:View {
 
 struct IndependentPlannerView:View {
     @StateObject private var model=IndependentPlanner()
+    @AppStorage("share_auto_start_navigation") private var autoStartSharedRoute=false
     @ObservedObject var guide=WebMotorSession.shared
     @State private var mode:IndependentMode
     @State private var pick:Int?
@@ -86,6 +87,8 @@ struct IndependentPlannerView:View {
                     Picker("出行方式",selection:$mode){ForEach(IndependentMode.allCases){Text($0.rawValue).tag($0)}}.pickerStyle(.segmented)
                         .onChange(of:mode){_ in model.invalidate();model.message=""}
                     inputCard
+                    Toggle("分享路线后直接开始导航",isOn:$autoStartSharedRoute)
+                        .tint(ContentView.pink)
                     HStack{
                         Button("路线历史"){showHistory=true};Spacer()
                         if mode == .motorcycle{Button("高德登录／验证"){login=true}}
