@@ -111,6 +111,12 @@ struct MotoNavApp: App {
             let p = msg.split(separator: ",").map(String.init)
             if p.count >= 3, p[0] == "T", p[1] == "F" { ScreenFavorites.shared.receive(p); return }
             if p.first == "BOOT", p.count >= 2, let id = Int(p[1]) { Settings.shared.bootReply(id); return }
+            if p.count >= 3, p[0] == "T", p[1] == "N", p[2] == "STOP" {
+                if WebMotorSession.shared.running { WebMotorSession.shared.stop() }
+                else if NaviBridge.shared.navigating { NaviBridge.shared.stop() }
+                else { BleLink.shared.sendOnce("#CR,IDLE") }
+                return
+            }
             if p.count >= 3, p[0] == "T", p[1] == "CR" {
                 if p[2] == "START" {
                     guard !Settings.shared.amapKeyInUse.isEmpty else { BleLink.shared.sendOnce("#CR,KEY"); return }
